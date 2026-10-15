@@ -1,0 +1,16 @@
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+.pub-cache/
+.idea/
+.vscode/
+build/
+.tool/
+.bootstrap/
+coverage/
+android/local.properties
+ios/Flutter/.last_build_id
+macos/Flutter/GeneratedPluginRegistrant.swift
+windows/flutter/ephemeral/
+linux/flutter/ephemeral/
