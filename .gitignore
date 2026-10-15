@@ -14,3 +14,5 @@ ios/Flutter/.last_build_id
 macos/Flutter/GeneratedPluginRegistrant.swift
 windows/flutter/ephemeral/
 linux/flutter/ephemeral/
+
+dist/
