@@ -10,6 +10,8 @@ Windows 隧道数据面使用官方 [HEV SOCKS5 Tunnel](https://github.com/heihe
 
 ## Windows 便携版
 
+下载：[LanSocks 1.0.0 Windows x64 便携包](https://github.com/HanJason233/LanSocks/releases/latest/download/LanSocks-windows-x64.zip)。
+
 构建产物目录：`build/windows/x64/runner/Release/`。其中 `lansocks.exe` 和同目录运行文件需要一起保留。构建脚本会将运行依赖及第三方声明复制到该目录，并附带 HEV 构建所需的 MSYS2 源码归档。将整个 `Release` 目录打包或复制到目标电脑即可运行，不需要安装 Flutter。
 
 启动 `lansocks.exe` 后，填入手机在当前局域网可访问的 IPv4 地址、SOCKS5 端口和可选账号密码。连接时 Windows 会请求管理员权限，以配置隧道路由和 DNS。首次使用请先用“测试 SOCKS5”确认电脑能访问手机服务。
@@ -42,7 +44,7 @@ Windows 构建需要 Flutter 3.47.7、Git、CMake、Ninja，以及安装了“�
 克隆仓库时要包含 HEV 子模块，然后在项目目录的 PowerShell 中执行：
 
 ```powershell
-git clone --recurse-submodules <GitHub 仓库地址>
+git clone --recurse-submodules https://github.com/HanJason233/LanSocks.git
 cd LanSocks
 Set-ExecutionPolicy -Scope Process Bypass
 .\tool\build_windows.ps1 -Configuration Release
