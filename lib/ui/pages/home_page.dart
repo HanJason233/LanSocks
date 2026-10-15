@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import '../../models/socks5_config.dart';
 import '../../models/tunnel_settings.dart';
 import '../../models/tunnel_status.dart';
+import '../../services/socks5_uri_parser.dart';
 import '../../services/tunnel_manager.dart';
 import '../widgets/connect_button.dart';
 import '../widgets/status_card.dart';
@@ -26,10 +27,12 @@ class _HomePageState extends State<HomePage> {
   final _port = TextEditingController(text: '1080');
   final _username = TextEditingController();
   final _password = TextEditingController();
+  final _uri = TextEditingController();
   final _target = TextEditingController(text: 'example.com');
   final _targetPort = TextEditingController(text: '443');
   bool _showPassword = false;
   bool _testing = false;
+  String? _importedName;
 
   @override
   void dispose() {
@@ -37,6 +40,7 @@ class _HomePageState extends State<HomePage> {
     _port.dispose();
     _username.dispose();
     _password.dispose();
+    _uri.dispose();
     _target.dispose();
     _targetPort.dispose();
     super.dispose();
@@ -48,6 +52,36 @@ class _HomePageState extends State<HomePage> {
     username: _username.text,
     password: _password.text,
   );
+
+  void _importUri() {
+    try {
+      final imported = Socks5UriParser.parse(_uri.text);
+      setState(() {
+        _address.text = imported.config.address;
+        _port.text = imported.config.port.toString();
+        _username.text = imported.config.username;
+        _password.text = imported.config.password;
+        _importedName = imported.name;
+        _uri.clear();
+      });
+      FocusScope.of(context).unfocus();
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            imported.name == null ? 'SOCKS5 URI 已导入' : '已导入：${imported.name}',
+          ),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    } on FormatException catch (error) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(error.message.toString()),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    }
+  }
 
   Future<void> _test() async {
     if (!_formKey.currentState!.validate()) return;
@@ -105,6 +139,47 @@ class _HomePageState extends State<HomePage> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
+                    ExpansionTile(
+                      tilePadding: EdgeInsets.zero,
+                      childrenPadding: EdgeInsets.zero,
+                      leading: const Icon(Icons.link),
+                      title: const Text('从 URI 导入'),
+                      subtitle: const Text('支持 socks:// 和 socks5:// 链接'),
+                      children: [
+                        TextField(
+                          controller: _uri,
+                          minLines: 1,
+                          maxLines: 3,
+                          autocorrect: false,
+                          enableSuggestions: false,
+                          keyboardType: TextInputType.url,
+                          decoration: const InputDecoration(
+                            labelText: 'SOCKS5 URI',
+                            hintText:
+                                'socks://Base64用户名密码@192.168.1.50:10808#名称',
+                            border: OutlineInputBorder(),
+                          ),
+                          onSubmitted: (_) => _importUri(),
+                        ),
+                        const SizedBox(height: 8),
+                        Align(
+                          alignment: Alignment.centerRight,
+                          child: FilledButton.icon(
+                            onPressed: _importUri,
+                            icon: const Icon(Icons.download),
+                            label: const Text('导入并填入'),
+                          ),
+                        ),
+                      ],
+                    ),
+                    if (_importedName != null) ...[
+                      const SizedBox(height: 8),
+                      Chip(
+                        avatar: const Icon(Icons.bookmark_outline, size: 18),
+                        label: Text('导入名称：$_importedName'),
+                      ),
+                    ],
+                    const SizedBox(height: 8),
                     Text(
                       '手机 SOCKS5 服务',
                       style: Theme.of(context).textTheme.titleMedium,

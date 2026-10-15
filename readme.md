@@ -31,6 +31,8 @@ To build HEV from its pinned source instead of using the official Windows releas
 
 Enter the phone's reachable IPv4 address, SOCKS5 port, and optional username and password. The **Test SOCKS5** action performs the SOCKS5 negotiation and a CONNECT request to the selected test target. Connect then requests Windows administrator approval to install routes. The app checks that the SOCKS server stays reachable through the physical network and that the test target is routed through the HEV adapter.
 
+You can also expand **Import from URI** on the connection page and paste a `socks://` or `socks5://` URI. The URI can contain Base64 or Base64URL encoded `username:password` credentials, or plain `username:password` user info. A fragment such as `#Chimera-LAN` is shown as the imported name.
+
 Windows adds a specific physical route for the SOCKS5 server, IPv4 default routes through the tunnel, and routes for configured IPv4 DNS servers. On disconnect, helper exit, or detected HEV failure, routes created by LanSocks are removed. System DNS addresses and IPv6 settings are not changed. Use the recovery action if Windows reports that a previous session left recovery state behind.
 
 ## Project files
