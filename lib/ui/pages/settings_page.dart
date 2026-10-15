@@ -115,7 +115,7 @@ class _SettingsPageState extends State<SettingsPage> {
                     leading: Icon(Icons.dns_outlined),
                     title: Text('DNS'),
                     subtitle: Text(
-                      '保留系统 DNS 地址；IPv4 DNS 服务器路由到 HEV。当前不修改 DNS 配置。',
+                      '连接时活动网卡 IPv4 DNS 使用 HEV MapDNS，IPv6 DNS 阻止直连；断开后恢复原设置。',
                     ),
                   ),
                   const Divider(height: 1),
@@ -193,7 +193,7 @@ class _SettingsPageState extends State<SettingsPage> {
                 leading: Icon(Icons.info_outline),
                 title: Text('IPv6 支持状态'),
                 subtitle: Text(
-                  'Windows 版本尚未接管 IPv6。应用不会修改系统 IPv6 设置；IPv6 流量可能直连。',
+                  'IPv6 应用流量尚未接管，可能直连；连接期间暂时阻止 IPv6 DNS 直连，断开后恢复原设置。',
                 ),
               ),
             ),

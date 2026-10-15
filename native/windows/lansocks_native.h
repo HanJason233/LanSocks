@@ -10,7 +10,6 @@
 #include <iphlpapi.h>
 
 #include <string>
-#include <vector>
 
 namespace lansocks {
 
@@ -18,6 +17,10 @@ constexpr DWORD kStateMagic = 0x4c534b53;  // LSKS
 constexpr DWORD kStateVersion = 1;
 constexpr DWORD kMaxRoutes = 48;
 constexpr wchar_t kTunnelGuid[] = L"6f06c4a2-6f95-4f25-98f0-cf4608d50b41";
+constexpr wchar_t kMapDnsAddress[] = L"198.18.0.2";
+constexpr wchar_t kMapDnsNetwork[] = L"100.64.0.0";
+constexpr wchar_t kMapDnsNetmask[] = L"255.192.0.0";
+constexpr wchar_t kMapDnsIpv6Block[] = L"::1";
 
 enum class SessionPhase : DWORD {
   Starting = 1,
@@ -63,6 +66,7 @@ struct AppPaths {
   std::wstring logDirectory;
   std::wstring configPath;
   std::wstring statePath;
+  std::wstring dnsStatePath;
   std::wstring errorPath;
   std::wstring hevPath;
   std::wstring helperPath;
@@ -79,8 +83,15 @@ bool ResolvePhysicalRoute(const IN_ADDR& destination,
 bool ResolveDefaultGateway(NET_IFINDEX interfaceIndex,
                            IN_ADDR* gateway,
                            std::wstring* error);
-bool EnumerateIpv4DnsServers(std::vector<IN_ADDR>* servers,
-                             std::wstring* error);
+bool CaptureDnsSnapshot(const AppPaths& paths, std::wstring* error);
+bool EnsureMapDnsSettings(const AppPaths& paths,
+                          bool* changed,
+                          std::wstring* error);
+bool VerifyMapDnsSettings(const AppPaths& paths, std::wstring* error);
+bool VerifyMapDnsQuery(std::wstring* error);
+bool RestoreDnsSnapshot(const AppPaths& paths, std::wstring* error);
+bool RemoveDnsSnapshot(const AppPaths& paths);
+bool HasDnsSnapshot(const AppPaths& paths);
 bool GetTunnelInterfaceIndex(NET_IFINDEX* index);
 bool WaitForTunnelInterface(NET_IFINDEX* index,
                             HANDLE hevProcess,

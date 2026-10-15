@@ -350,7 +350,7 @@ class _HomePageState extends State<HomePage> {
                   SizedBox(width: 12),
                   Expanded(
                     child: Text(
-                      '当前 Windows 版本只接管 IPv4。IPv6 设置不会被更改，IPv6 流量可能绕过隧道。',
+                      '当前 Windows 版本只接管 IPv4，IPv6 流量可能绕过隧道。连接期间会阻止 IPv6 DNS 直连，并在断开后恢复原设置。',
                     ),
                   ),
                 ],

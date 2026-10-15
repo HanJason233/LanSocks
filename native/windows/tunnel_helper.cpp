@@ -40,6 +40,31 @@ bool ReadFileBytes(const std::wstring& path, std::string* bytes) {
   return stream.good() || stream.eof();
 }
 
+std::wstring ReadHevLogTail(const std::wstring& path) {
+  constexpr std::streamoff kMaxLogTailBytes = 4096;
+  std::ifstream stream(std::filesystem::path(path), std::ios::binary);
+  if (!stream) return L"";
+
+  stream.seekg(0, std::ios::end);
+  const std::streamoff size = stream.tellg();
+  if (size <= 0) return L"";
+  const std::streamoff start =
+      size > kMaxLogTailBytes ? size - kMaxLogTailBytes : 0;
+  stream.seekg(start, std::ios::beg);
+  std::string tail(static_cast<size_t>(size - start), '\0');
+  stream.read(tail.data(), static_cast<std::streamsize>(tail.size()));
+  if (!stream && !stream.eof()) return L"";
+
+  // A byte-limited tail can start in the middle of a UTF-8 line. Drop that
+  // partial line so the diagnostic remains valid UTF-8.
+  if (start > 0) {
+    const size_t firstNewline = tail.find('\n');
+    if (firstNewline == std::string::npos) return L"";
+    tail.erase(0, firstNewline + 1);
+  }
+  return Utf8ToWide(tail);
+}
+
 bool ParseUnsigned(const std::wstring& text, ULONG maximum, ULONG* value) {
   if (text.empty()) return false;
   wchar_t* end = nullptr;
@@ -244,30 +269,46 @@ bool StopProcessIfExpected(DWORD processId, const std::wstring& expectedPath) {
 bool CleanupSession(const AppPaths& paths,
                     const SessionState& state,
                     std::wstring* error) {
-  bool success = true;
+  bool routesRestored = true;
   std::wstring message;
   for (DWORD i = state.routeCount; i > 0; --i) {
     std::wstring routeError;
     if (!DeleteRoute(state.routes[i - 1], &routeError)) {
-      success = false;
+      routesRestored = false;
       message = routeError;
     }
   }
+  if (!routesRestored) {
+    if (error) *error = message;
+    WriteLastError(paths, message);
+    return false;
+  }
 
   if (!StopProcessIfExpected(state.hevPid, state.hevPath)) {
-    success = false;
     message = L"无法安全停止已记录的 HEV 进程。";
+    if (error) *error = message;
+    WriteLastError(paths, message);
+    return false;
   }
-  if (!success) {
+
+  std::wstring dnsError;
+  if (!RestoreDnsSnapshot(paths, &dnsError)) {
+    message = L"DNS 配置恢复失败：" + dnsError;
     if (error) *error = message;
     WriteLastError(paths, message);
     return false;
   }
 
   DeleteFileW(state.configPath);
+  if (!RemoveDnsSnapshot(paths)) {
+    message = L"网络已恢复，但无法删除 DNS 恢复快照。";
+    if (error) *error = message;
+    WriteLastError(paths, message);
+    return false;
+  }
   DeleteFileW(paths.errorPath.c_str());
   if (!RemoveSession(paths)) {
-    if (error) *error = L"网络已恢复，但无法删除恢复记录文件。";
+    if (error) *error = L"网络已恢复，但无法删除网络恢复记录。";
     return false;
   }
   return true;
@@ -288,7 +329,9 @@ void AddRouteOrThrow(SessionState* state,
   }
 }
 
-bool NetworkPathStillUsable(const SessionState& state) {
+bool NetworkPathStillUsable(const AppPaths& paths,
+                            const SessionState& state,
+                            std::wstring* error) {
   MIB_IF_ROW2 adapter{};
   adapter.InterfaceIndex = state.physicalIndex;
   if (GetIfEntry2(&adapter) != NO_ERROR ||
@@ -307,9 +350,30 @@ bool NetworkPathStillUsable(const SessionState& state) {
                             &ignored)) {
     return false;
   }
-  return currentIndex == state.physicalIndex &&
-         currentHop.S_un.S_addr ==
-             state.routes[0].nextHop.Ipv4.sin_addr.S_un.S_addr;
+  if (currentIndex != state.physicalIndex ||
+      currentHop.S_un.S_addr !=
+          state.routes[0].nextHop.Ipv4.sin_addr.S_un.S_addr) {
+    if (error) *error = L"SOCKS5 物理网卡或网关发生变化。";
+    return false;
+  }
+
+  IN_ADDR mapDnsAddress{};
+  IN_ADDR mappedNetwork{};
+  InetPtonW(AF_INET, kMapDnsAddress, &mapDnsAddress);
+  InetPtonW(AF_INET, kMapDnsNetwork, &mappedNetwork);
+  if (!BestRouteUsesInterface(state.socksAddress, state.physicalIndex) ||
+      !BestRouteUsesInterface(mapDnsAddress, state.tunnelIndex) ||
+      !BestRouteUsesInterface(mappedNetwork, state.tunnelIndex)) {
+    if (error) *error = L"MapDNS、映射地址网段或 SOCKS5 绕行路由失效。";
+    return false;
+  }
+
+  bool dnsChanged = false;
+  if (!EnsureMapDnsSettings(paths, &dnsChanged, error) ||
+      !VerifyMapDnsSettings(paths, error)) {
+    return false;
+  }
+  return !dnsChanged || VerifyMapDnsQuery(error);
 }
 
 void MonitorUntilStop(const AppPaths& paths,
@@ -321,6 +385,7 @@ void MonitorUntilStop(const AppPaths& paths,
   bool parentClosed = false;
   bool hevExited = false;
   bool requested = false;
+  std::wstring healthError;
   for (;;) {
     const DWORD result = WaitForMultipleObjects(3, handles, FALSE, 2000);
     if (result == WAIT_OBJECT_0) {
@@ -335,9 +400,15 @@ void MonitorUntilStop(const AppPaths& paths,
       requested = true;
       break;
     }
-    if (result != WAIT_TIMEOUT || !NetworkPathStillUsable(state)) break;
+    if (result != WAIT_TIMEOUT ||
+        !NetworkPathStillUsable(paths, state, &healthError)) {
+      break;
+    }
   }
 
+  if (!healthError.empty()) {
+    AppendHelperLog(paths, L"DNS 或路由健康检查失败：" + healthError);
+  }
   if (parentClosed) {
     AppendHelperLog(paths, L"LanSocks 界面已关闭，正在清理隧道路由。");
   } else if (hevExited) {
@@ -445,7 +516,23 @@ bool SignalRunningHelper(const AppPaths& paths, std::wstring* error) {
   SessionState state{};
   const bool stateExists =
       GetFileAttributesW(paths.statePath.c_str()) != INVALID_FILE_ATTRIBUTES;
-  if (!stateExists) return true;
+  if (!stateExists) {
+    if (!HasDnsSnapshot(paths)) return true;
+    HANDLE mutex = nullptr;
+    if (!AcquireMutex(&mutex, error)) return false;
+    std::wstring restoreError;
+    const bool restored = RestoreDnsSnapshot(paths, &restoreError);
+    const bool removed = restored && RemoveDnsSnapshot(paths);
+    ReleaseMutex(mutex);
+    CloseHandle(mutex);
+    if (!restored || !removed) {
+      if (error) {
+        *error = restored ? L"无法删除 DNS 恢复快照。" : restoreError;
+      }
+      return false;
+    }
+    return true;
+  }
   if (!ReadSession(paths, &state)) {
     if (error) *error = L"The network recovery record is unreadable.";
     return false;
@@ -516,6 +603,7 @@ bool ParseAndValidateConfig(const std::wstring& path,
 
   std::map<std::wstring, std::wstring> tunnel;
   std::map<std::wstring, std::wstring> socks5;
+  std::map<std::wstring, std::wstring> mapdns;
   std::map<std::wstring, std::wstring> misc;
   std::map<std::wstring, std::wstring>* current = nullptr;
   int section = 0;
@@ -534,9 +622,14 @@ bool ParseAndValidateConfig(const std::wstring& path,
       section = 2;
       continue;
     }
-    if (line == L"misc:" && section == 2) {
-      current = &misc;
+    if (line == L"mapdns:" && section == 2) {
+      current = &mapdns;
       section = 3;
+      continue;
+    }
+    if (line == L"misc:" && section == 3) {
+      current = &misc;
+      section = 4;
       continue;
     }
     if (current == nullptr || line.size() < 4 ||
@@ -557,8 +650,9 @@ bool ParseAndValidateConfig(const std::wstring& path,
     }
   }
 
-  if (section != 3 || tunnel.size() != 6 ||
-      (socks5.size() != 3 && socks5.size() != 5) || misc.size() != 2) {
+  if (section != 4 || tunnel.size() != 6 ||
+      (socks5.size() != 3 && socks5.size() != 5) || mapdns.size() != 5 ||
+      misc.size() != 2) {
     if (error) *error = L"HEV 配置字段不完整或含有未知字段。";
     return false;
   }
@@ -589,6 +683,29 @@ bool ParseAndValidateConfig(const std::wstring& path,
   if (!ParseSingleQuoted(socks5[L"udp"], &udp) ||
       (udp != L"udp" && udp != L"tcp")) {
     if (error) *error = L"HEV UDP 模式无效。";
+    return false;
+  }
+  ULONG mapDnsPort = 0;
+  ULONG mapDnsCacheSize = 0;
+  IN_ADDR mapDnsAddress{};
+  IN_ADDR mapDnsNetwork{};
+  IN_ADDR mapDnsNetmask{};
+  IN_ADDR expectedMapDns{};
+  IN_ADDR expectedMapNetwork{};
+  IN_ADDR expectedMapNetmask{};
+  InetPtonW(AF_INET, kMapDnsAddress, &expectedMapDns);
+  InetPtonW(AF_INET, kMapDnsNetwork, &expectedMapNetwork);
+  InetPtonW(AF_INET, kMapDnsNetmask, &expectedMapNetmask);
+  if (!ParseIpv4(mapdns[L"address"], &mapDnsAddress) ||
+      !ParseIpv4(mapdns[L"network"], &mapDnsNetwork) ||
+      !ParseIpv4(mapdns[L"netmask"], &mapDnsNetmask) ||
+      !ParseUnsigned(mapdns[L"port"], 65535, &mapDnsPort) ||
+      !ParseUnsigned(mapdns[L"cache-size"], 1000000, &mapDnsCacheSize) ||
+      mapDnsAddress.S_un.S_addr != expectedMapDns.S_un.S_addr ||
+      mapDnsNetwork.S_un.S_addr != expectedMapNetwork.S_un.S_addr ||
+      mapDnsNetmask.S_un.S_addr != expectedMapNetmask.S_un.S_addr ||
+      mapDnsPort != 53 || mapDnsCacheSize != 10000) {
+    if (error) *error = L"HEV MapDNS 必须使用固定的 TUN DNS 与映射网段。";
     return false;
   }
   const bool hasUsername = socks5.find(L"username") != socks5.end();
@@ -656,6 +773,16 @@ bool StartTunnel(const AppPaths& paths,
   if (!ParseAndValidateConfig(paths.configPath, socksAddress, port, error)) {
     return false;
   }
+  IN_ADDR mapDnsEndpoint{};
+  InetPtonW(AF_INET, kMapDnsAddress, &mapDnsEndpoint);
+  const ULONG socksHostAddress = ntohl(socksAddress.S_un.S_addr);
+  if (socksAddress.S_un.S_addr == mapDnsEndpoint.S_un.S_addr ||
+      (socksHostAddress & 0xffc00000UL) == 0x64400000UL) {
+    if (error) {
+      *error = L"SOCKS5 地址与 HEV MapDNS 地址或映射网段冲突，无法同时保证两条路由。";
+    }
+    return false;
+  }
 
   HANDLE parent = nullptr;
   if (!ValidateParentProcess(parentPid, paths, &parent, error)) return false;
@@ -693,7 +820,12 @@ bool StartTunnel(const AppPaths& paths,
   state.routes[0] = MakeIpv4Route(socksAddress, 32, physicalNextHop,
                                   state.physicalIndex, kBypassRouteMetric);
   state.routeCount = 0;
+  if (!CaptureDnsSnapshot(paths, error)) {
+    CloseHandle(parent);
+    return false;
+  }
   if (!SaveSession(paths, state)) {
+    RemoveDnsSnapshot(paths);
     CloseHandle(parent);
     if (error) *error = L"无法创建网络恢复记录。";
     return false;
@@ -708,37 +840,41 @@ bool StartTunnel(const AppPaths& paths,
 
     NET_IFINDEX tunnelIndex = 0;
     if (!WaitForTunnelInterface(&tunnelIndex, hevProcess, 20000)) {
-      TerminateProcess(hevProcess, 1);
+      DWORD hevExitCode = STILL_ACTIVE;
+      const bool exitCodeAvailable =
+          GetExitCodeProcess(hevProcess, &hevExitCode) != FALSE;
+      const bool hevExited =
+          exitCodeAvailable && hevExitCode != STILL_ACTIVE;
+      if (error) {
+        if (hevExited) {
+          *error = L"HEV 在创建 Wintun 网卡前退出，退出码 " +
+                   std::to_wstring(hevExitCode) + L"。";
+        } else if (exitCodeAvailable) {
+          *error = L"HEV 仍在运行，但 20 秒内没有发现预期的 Wintun 网卡（GUID " +
+                   std::wstring(kTunnelGuid) + L"）。";
+        } else {
+          *error = L"无法读取 HEV 进程状态，且没有发现预期的 Wintun 网卡（GUID " +
+                   std::wstring(kTunnelGuid) + L"）。";
+        }
+        const std::wstring logTail = ReadHevLogTail(paths.logPath);
+        if (!logTail.empty()) {
+          *error += L"\nHEV 启动日志尾部：\n" + logTail;
+        }
+      }
+      if (!hevExited) TerminateProcess(hevProcess, 1);
       WaitForSingleObject(hevProcess, 5000);
       CloseHandle(hevProcess);
       throw std::runtime_error("Wintun interface was not ready");
     }
     state.tunnelIndex = tunnelIndex;
 
-    std::vector<IN_ADDR> dnsServers;
-    if (!EnumerateIpv4DnsServers(&dnsServers, error)) {
-      TerminateProcess(hevProcess, 1);
-      WaitForSingleObject(hevProcess, 5000);
-      CloseHandle(hevProcess);
-      throw std::runtime_error("DNS configuration could not be read");
-    }
-    std::vector<IN_ADDR> dnsThroughTunnel;
-    for (const IN_ADDR& dns : dnsServers) {
-      if (dns.S_un.S_addr == socksAddress.S_un.S_addr) {
-        TerminateProcess(hevProcess, 1);
-        WaitForSingleObject(hevProcess, 5000);
-        CloseHandle(hevProcess);
-        if (error) {
-          *error = L"SOCKS5 服务地址同时被用作 DNS 服务器，无法避免 DNS 直连。";
-        }
-        throw std::runtime_error("SOCKS and DNS share an address");
-      }
-      dnsThroughTunnel.push_back(dns);
-    }
-
     IN_ADDR zero{};
     IN_ADDR upperHalf{};
+    IN_ADDR mapDnsAddress{};
+    IN_ADDR mappedNetwork{};
     upperHalf.S_un.S_addr = htonl(0x80000000UL);
+    InetPtonW(AF_INET, kMapDnsAddress, &mapDnsAddress);
+    InetPtonW(AF_INET, kMapDnsNetwork, &mappedNetwork);
     AddRouteOrThrow(
         &state, paths,
         MakeIpv4Route(zero, 1, zero, state.tunnelIndex, kTunnelRouteMetric));
@@ -746,11 +882,14 @@ bool StartTunnel(const AppPaths& paths,
         &state, paths,
         MakeIpv4Route(upperHalf, 1, zero, state.tunnelIndex,
                       kTunnelRouteMetric));
-    for (const IN_ADDR& dns : dnsThroughTunnel) {
-      AddRouteOrThrow(
-          &state, paths,
-          MakeIpv4Route(dns, 32, zero, state.tunnelIndex, kTunnelRouteMetric));
-    }
+    AddRouteOrThrow(
+        &state, paths,
+        MakeIpv4Route(mapDnsAddress, 32, zero, state.tunnelIndex,
+                      kTunnelRouteMetric));
+    AddRouteOrThrow(
+        &state, paths,
+        MakeIpv4Route(mappedNetwork, 10, zero, state.tunnelIndex,
+                      kTunnelRouteMetric));
 
     if (!BestRouteUsesInterface(socksAddress, state.physicalIndex)) {
       if (error) *error = L"SOCKS5 绕行路由未生效，已回滚以避免 TUN 回环。";
@@ -767,11 +906,16 @@ bool StartTunnel(const AppPaths& paths,
       }
       throw std::runtime_error("default TUN route verification failed");
     }
-    for (const IN_ADDR& dns : dnsThroughTunnel) {
-      if (!BestRouteUsesInterface(dns, state.tunnelIndex)) {
-        if (error) *error = L"IPv4 DNS 路由未能通过 HEV，已回滚。";
-        throw std::runtime_error("DNS TUN route verification failed");
-      }
+    if (!BestRouteUsesInterface(mapDnsAddress, state.tunnelIndex) ||
+        !BestRouteUsesInterface(mappedNetwork, state.tunnelIndex)) {
+      if (error) *error = L"MapDNS 或映射地址路由未通过 HEV TUN。";
+      throw std::runtime_error("MapDNS TUN route verification failed");
+    }
+
+    bool dnsChanged = false;
+    if (!EnsureMapDnsSettings(paths, &dnsChanged, error) ||
+        !VerifyMapDnsSettings(paths, error) || !VerifyMapDnsQuery(error)) {
+      throw std::runtime_error("Windows DNS MapDNS verification failed");
     }
 
     state.phase = SessionPhase::Active;
@@ -780,12 +924,10 @@ bool StartTunnel(const AppPaths& paths,
       throw std::runtime_error("Could not persist active session state");
     }
     DeleteFileW(paths.errorPath.c_str());
-    AppendHelperLog(paths, L"HEV 已启动；IPv4 TUN 与 SOCKS5 绕行路由已配置。");
-    if (dnsThroughTunnel.empty()) {
-      AppendHelperLog(paths, L"未发现 IPv4 DNS 服务器；请确认系统 DNS 配置。");
-    } else {
-      AppendHelperLog(paths, L"IPv4 DNS 服务器路由到 HEV，系统 DNS 配置保持不变。");
-    }
+    std::wstring startupMessage =
+        L"HEV TUN 路由、SOCKS5 物理绕行、活动网卡 DNS 与 MapDNS 查询均已验证。";
+    if (dnsChanged) startupMessage += L" Windows DNS 已切换到 MapDNS。";
+    AppendHelperLog(paths, startupMessage);
 
     MonitorUntilStop(paths, state, parent, hevProcess, stopEvent);
     CloseHandle(hevProcess);
@@ -865,6 +1007,8 @@ bool GetAppPaths(AppPaths* paths, std::wstring* error) {
   paths->configPath = (localPath / L"LanSocks" / L"runtime" / L"hev.yml").wstring();
   paths->statePath =
       (localPath / L"LanSocks" / L"recovery" / L"session.bin").wstring();
+  paths->dnsStatePath =
+      (localPath / L"LanSocks" / L"recovery" / L"dns.bin").wstring();
   paths->errorPath =
       (localPath / L"LanSocks" / L"recovery" / L"last-error.txt").wstring();
   paths->logPath = (localPath / L"LanSocks" / L"logs" / L"hev.log").wstring();
@@ -1029,8 +1173,21 @@ int RunHelper(int argc, wchar_t** argv) {
       return 8;
     }
   }
+  if (HasDnsSnapshot(paths)) {
+    std::wstring restoreError;
+    if (!RestoreDnsSnapshot(paths, &restoreError) ||
+        !RemoveDnsSnapshot(paths)) {
+      ReleaseMutex(mutex);
+      CloseHandle(mutex);
+      WriteLastError(paths, restoreError.empty()
+                                 ? L"无法删除 DNS 恢复快照。"
+                                 : restoreError);
+      return 8;
+    }
+  }
   HANDLE stopEvent = CreateEventW(nullptr, TRUE, FALSE, kStopEventName);
-  if (stopEvent == nullptr) {
+  if (stopEvent == nullptr || !ResetEvent(stopEvent)) {
+    if (stopEvent != nullptr) CloseHandle(stopEvent);
     ReleaseMutex(mutex);
     CloseHandle(mutex);
     WriteLastError(paths, L"无法创建隧道停止事件。");

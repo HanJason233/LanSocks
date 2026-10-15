@@ -14,6 +14,12 @@ void main() {
       expect(yaml, contains('guid: ${HevConfig.tunnelGuid}'));
       expect(yaml, contains('address: 192.168.1.50'));
       expect(yaml, contains('port: 1080'));
+      expect(yaml, contains('mapdns:'));
+      expect(yaml, contains('  address: ${HevConfig.mapDnsAddress}'));
+      expect(yaml, contains('  port: 53'));
+      expect(yaml, contains('  network: ${HevConfig.mapDnsNetwork}'));
+      expect(yaml, contains('  netmask: ${HevConfig.mapDnsNetmask}'));
+      expect(yaml, contains('  cache-size: 10000'));
       expect(yaml, contains("udp: 'udp'"));
       expect(yaml, contains('log-file: stdout'));
       expect(yaml, isNot(contains('192.168.1.50:1080')));

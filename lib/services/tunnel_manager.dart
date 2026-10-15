@@ -145,8 +145,8 @@ class TunnelManager {
       _lastTargetPort = targetPort;
       startAttempted = true;
       await _platform.start(socks5, settings, path);
-      logs.add('HEV 已启动，Wintun TUN 和 IPv4 路由已配置。');
-      logs.add('IPv4 DNS 请求通过 HEV 路由转发；系统 DNS 地址未修改。');
+      logs.add('HEV 已启动，MapDNS 与 Wintun IPv4 路由验证通过。');
+      logs.add('Windows 活动网卡 DNS 已验证：IPv4 使用 MapDNS，IPv6 DNS 被回环阻止。');
 
       // Resolve after route installation, then confirm both route selection and
       // a real TCP handshake use the host system's routing table.
@@ -202,7 +202,7 @@ class TunnelManager {
       await _platform.stop();
       await _removeRuntimeConfig();
       status.value = const TunnelStatus();
-      logs.add('HEV 已停止；程序创建的路由已删除，原始系统 DNS 未改动。');
+      logs.add('HEV 已停止；本次添加的路由已删除，原始 DNS 设置已恢复。');
     } catch (error) {
       status.value = TunnelStatus(
         phase: TunnelPhase.error,
